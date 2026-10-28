@@ -1,0 +1,67 @@
+# Boot template: lemans-evk (IQ-9075 EVK), Qualcomm Linux qcomflash, qdl.
+#
+# Deploy + boot actions copied verbatim from LAVA job 516300 (Complete on
+# rb8-hyd-06). lava_job.py render keeps everything here and appends the
+# Memory_Snapshot test actions. To target another image, replace the qcomflash
+# url (or pass --image-url); the artifact header names the LAVA-side secret
+# Q_QLI_S3_TOKEN, so no credential is written into the job.
+device_type: lemans-evk
+timeouts:
+  job:
+    minutes: 120
+  connection:
+    minutes: 2
+  actions:
+    finalize:
+      seconds: 60
+context:
+  test_character_delay: 10
+priority: 50
+visibility: public
+actions:
+- deploy:
+    rootfs_image: qcom-multimedia-image-iq-9075-evk/rootfs.img
+    qcomflash:
+      headers:
+        QLIAuthorization: Q_QLI_S3_TOKEN
+      url: https://qli-prod-artifacts.qualcomm.com/qcom-prd-gh-artifacts/qualcomm-linux/meta-qcom/39738038624-1//qcom-distro/iq-9075-evk/qcom-multimedia-image-iq-9075-evk.rootfs.qcomflash.tar.gz
+      apply-overlay: true
+    timeout:
+      minutes: 40
+    to: qdl
+- boot:
+    firehose_program: prog_firehose_ddr.elf
+    rawprogram: rawprogram0.xml
+    patch: patch0.xml
+    path: qcom-multimedia-image-iq-9075-evk/sail_nor
+    storage: spinor
+    debug: true
+    ramdump: true
+    ramdump_timeout: 1800
+    timeout:
+      minutes: 15
+    method: qdl
+- boot:
+    firehose_program: prog_firehose_ddr.elf
+    rawprogram: rawprogram0.xml rawprogram1.xml rawprogram2.xml rawprogram3.xml rawprogram4.xml rawprogram5.xml
+    patch: patch0.xml patch1.xml patch2.xml patch3.xml patch4.xml patch5.xml
+    path: qcom-multimedia-image-iq-9075-evk
+    storage: ufs
+    debug: true
+    ramdump: true
+    ramdump_timeout: 1800
+    timeout:
+      minutes: 15
+    method: qdl
+- boot:
+    auto_login:
+      login_prompt: 'login:'
+      username: root
+      password_prompt: Password
+      password: oelinux123
+    prompts:
+    - root@lemans-evk
+    - root@(.*):[/~]#
+    timeout:
+      minutes: 30
+    method: minimal

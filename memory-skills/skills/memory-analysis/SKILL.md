@@ -2,13 +2,15 @@
 name: memory-analysis
 description: >
   Use this skill for all memory analysis tasks on Qualcomm Linux devices.
-  Supports four modes auto-detected from the parameters provided:
+  Supports five modes auto-detected from the parameters provided:
   (1) Snapshot: single memory snapshot from a connected device;
   (2) Workload: measure memory impact of a workload or application —
       2A Preset: use a named preset; 2B Custom: provide a shell command;
       2C User-Launched: user launches the workload manually, skill collects before/after;
   (3) Regression: compare a live device against a pre-collected reference snapshot;
-  (4) Comparison: compare two pre-collected snapshots offline (no device needed).
+  (4) Comparison: compare two pre-collected snapshots offline (no device needed);
+  (5) LAVA: schedule the qcom-linux-testkit Memory_Snapshot suite on a LAVA
+      board through the lava MCP server, then report on the finished job.
   Generates a unified HTML report with memory breakdown, process ranking,
   kernel/userspace diffs, and root cause analysis.
 license: BSD 3-Clause License
@@ -22,13 +24,13 @@ metadata:
   version: "0.0.1"
   platform: "Qualcomm Linux"
   category: "Memory Analysis"
-  internal-dependencies: "data-collection,snapshot-comparison,kernel-diff,userspace-diff,anomaly-rca,report-generation"
+  internal-dependencies: "data-collection,snapshot-comparison,kernel-diff,userspace-diff,anomaly-rca,report-generation,lava-integration"
   entry-point: "skills/memory-analysis/scripts/run.py"
   presets: "skills/memory-analysis/usecases/presets.json"
 ---
 
 Unified memory analysis skill for Qualcomm Linux devices.
-One skill, four modes — auto-detected from the parameters you provide.
+One skill, five modes — auto-detected from the parameters you provide.
 
 ---
 
@@ -78,6 +80,14 @@ Use these prompts when talking to an AI agent (Cline, Cursor, etc.):
 "I have two snapshot folders — compare them"
 ```
 
+### LAVA — Run on a lab board (lava MCP server)
+```
+"Give me a memory report for a lemans-evk in LAVA"
+"Flash lemans-evk with this build in LAVA and report its memory"
+"Measure memory impact of camera_h264_encoding on a LAVA lemans-evk"
+"Make the memory report for LAVA job 516300"
+```
+
 ---
 
 ## Mode Selection Guide
@@ -102,8 +112,11 @@ What do you want to do?
 ├─ "I want to check if my device uses more memory than a reference"
 │  └─ Regression mode: python run.py --reference <path> [--serial <serial>]
 │
-└─ "I want to compare two pre-collected snapshots"
-   └─ Comparison mode: python run.py --current <path> --reference <path>
+├─ "I want to compare two pre-collected snapshots"
+│  └─ Comparison mode: python run.py --current <path> --reference <path>
+│
+└─ "The board is in a LAVA lab" / "Report on LAVA job <id>"
+   └─ LAVA mode: lava_job.py render → lava MCP submit/fetch → python run.py --lava-results <dir>
 ```
 
 ---
@@ -349,6 +362,68 @@ python skills/memory-analysis/scripts/run.py \
 
 ---
 
+## Mode 5: LAVA (lava MCP server)
+
+**Use when:** The board is in a LAVA lab rather than on your desk, or you are
+given a LAVA job id. Requires the `lava` MCP server (tools `mcp__lava__*`).
+
+Collection runs on the board as the qcom-linux-testkit
+`Runner/suites/Performance/Memory_Snapshot` suite, which is the same entry
+lava-test-plans has in `testcases/performance.yaml`. LAVA keeps the suite's
+`snapshot-*` measurements and its log. `run.py --lava-results` rebuilds
+snapshot.json from them (`internal/lava-integration`) and then runs the Mode 1
+or Mode 2C pipeline unchanged.
+
+**Agent workflow:** one skill call. Do every step yourself without stopping:
+
+1. **Render the job.** Fill the parameters in from the request:
+   ```bash
+   # Snapshot
+   python skills/memory-analysis/scripts/lava_job.py render \
+     --device-type lemans-evk [--image-url <qcomflash url>] -o results/lava_<ts>/job.yaml
+
+   # Workload impact (baseline → start workload → active → stop)
+   python skills/memory-analysis/scripts/lava_job.py render \
+     --device-type lemans-evk --workload camera_h264_encoding -o results/lava_<ts>/job.yaml
+   python skills/memory-analysis/scripts/lava_job.py render \
+     --device-type lemans-evk --command "<cmd>" --workload-name "<label>" [--wait 15] \
+     -o results/lava_<ts>/job.yaml
+   ```
+   The deploy and boot actions come from `lava/boot-templates/<device-type>.yaml`.
+   If no template exists for the device type, call
+   `mcp__lava__find_boot_template(artifact_url, device_type)`, save its deploy
+   and boot actions as a new template, and pass `--boot-template`.
+2. **Validate.** Call `mcp__lava__validate_job(definition=<job.yaml text>)`. If it is invalid, fix the job and validate again.
+3. **Submit.** Call `mcp__lava__submit_job(definition=...)` and tell the user the job id.
+4. **Wait.** Poll `mcp__lava__get_job(job_id)` until `state` is `Finished`. Expect flashing to take 20 to 40 minutes. Poll every few minutes; don't spin. If `health` is not `Complete`, read `get_job_logs` and report why the job failed. Still continue to step 5 if the job has `snapshot-*` results.
+5. **Fetch.** Save the outputs to `results/lava_<id>/lava/`:
+   - `mcp__lava__get_job_results(job_id, limit=500)` → `results.json`
+   - `mcp__lava__get_job(job_id)` → `job.json`
+   - `mcp__lava__get_job_logs(job_id)` → `logs.yaml`
+
+   Write each tool result verbatim, or the JSON payload inside it. If a result spilled to a file, copy that file.
+
+   Without the MCP server, use `python skills/memory-analysis/scripts/lava_job.py fetch --job-id <id> --output-dir results/lava_<id>/lava`. That is the REST API; set `LAVA_TOKEN` for private jobs.
+6. **Report.**
+   ```bash
+   python skills/memory-analysis/scripts/run.py \
+     --lava-results results/lava_<id>/lava --output-dir results/lava_<id>
+   ```
+   If the job has one Memory_Snapshot run, this writes `snapshot_report.html`. If it has two or more (first = reference, last = current), it writes `workload_impact_report.html`.
+
+For an existing job id, start at step 5.
+
+**What LAVA cannot carry:** LAVA does not bring files back from the board. So
+the following are marked unavailable in the report:
+- per-cache slab detail (only the slab total is kept)
+- smaps
+- DT reserved-memory sizes (NHLOS is derived from rounding RAM up to the next 1 GB)
+- VSS/RSS (only PSS is kept)
+
+**Output:** `results/lava_<id>/reports/snapshot_report.html` or `workload_impact_report.html`
+
+---
+
 ## Parameters Reference
 
 | Parameter | Mode(s) | Required | Default | Description |
@@ -369,7 +444,13 @@ python skills/memory-analysis/scripts/run.py \
 | `--user` | 1,2,3 | No | `root` | SSH username |
 | `--output-dir` | all | No | `results/<mode>_<ts>/` | Output directory (use same dir for 2C collect steps) |
 | `--label` | 1,3,2C | No | `snapshot` | Label for the collected snapshot (use `baseline` or `active` for 2C) |
-| `--title` | 3,4,2C | No | auto | Report title |
+| `--title` | 3,4,2C,5 | No | auto | Report title |
+| `--lava-results` | 5 | Yes | -- | Dir with `results.json` [+ `job.json`, `logs.yaml`] from a finished LAVA job |
+
+`lava_job.py render` takes `--device-type`, `--boot-template`, `--image-url`,
+`--testkit-repo`, `--testkit-ref`, `--label`, `--settle`, `--workload` or
+`--command` with `--workload-name`, `--wait`, and `-o`.
+`lava_job.py fetch` takes `--job-id`, `--lava-url` and `--output-dir`.
 
 *Either `--workload` or `--command` required for Mode 2A/2B.
 **Required when using `--command`.
@@ -388,6 +469,7 @@ python skills/memory-analysis/scripts/run.py \
 | `baseline/snapshot.json` | 2A,2B,2C | Idle/pre-workload baseline snapshot |
 | `active/snapshot.json` | 2A,2B,2C | Active workload snapshot |
 | `snapshot/snapshot.json` | 1,3 | Collected device snapshot |
+| `lava_snapshots/<label>/snapshot.json` | 5 | Snapshots rebuilt from the LAVA job |
 | `reports/_intermediate/` | all | Intermediate JSON reports (for debugging) |
 
 ---
@@ -433,6 +515,13 @@ current/snapshot.json + reference/snapshot.json
        → Compare → Kernel diff → Userspace diff → comparison_report.html
 ```
 
+### Mode 5 (LAVA)
+```
+lava_job.py render → validate_job → submit_job → poll get_job
+       → get_job_results / get_job / get_job_logs → run.py --lava-results
+       → lava_to_snapshot → Mode 1 or Mode 2C pipeline → snapshot_report.html / workload_impact_report.html
+```
+
 ---
 
 ## Error Handling
@@ -442,4 +531,5 @@ current/snapshot.json + reference/snapshot.json
 - **Snapshot directory missing:** Inform the user and ask for the correct path.
 - **Partial collection failure:** Continue with available data; note missing sources in report.
 - **Workload stops early:** Collect snapshot anyway and note in report.
+- **LAVA job Incomplete / no `snapshot-*` results:** Report the failing action from `get_job_logs`. Do not resubmit unless the user asks.
 - See `TROUBLESHOOTING.md` for common ADB and SSH errors.

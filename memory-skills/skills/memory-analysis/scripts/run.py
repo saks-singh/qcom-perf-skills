@@ -13,6 +13,8 @@ Supports four analysis modes, auto-detected from the parameters provided:
      2C. User-Launched : User launches the workload manually; skill collects before/after
   3. Regression    : Compare live device against a pre-collected reference snapshot
   4. Comparison    : Compare two pre-collected snapshots (no device needed)
+  5. LAVA          : Report on a finished LAVA job that ran the qcom-linux-testkit
+                     Memory_Snapshot suite (job built by scripts/lava_job.py)
 
 Usage:
     # Mode 1: Single snapshot
@@ -38,6 +40,9 @@ Usage:
 
     # Mode 4: Compare two pre-collected snapshots (no device needed)
     python run.py --current <path> --reference <path>
+
+    # Mode 5: LAVA job results (results.json [+ job.json, logs.yaml] in one dir)
+    python run.py --lava-results <dir>
 
 Standard Prompts (for AI agents):
     "Give me a memory report for the connected device"
@@ -81,6 +86,7 @@ COLLECT           = INTERNAL / "data-collection"     / "scripts" / "collect.py"
 COMPARE_SNAPSHOTS = INTERNAL / "snapshot-comparison" / "scripts" / "compare_snapshots.py"
 KERNEL_DIFF       = INTERNAL / "kernel-diff"          / "scripts" / "analyze_kernel_diff.py"
 USERSPACE_DIFF    = INTERNAL / "userspace-diff"       / "scripts" / "analyze_userspace_diff.py"
+LAVA_TO_SNAPSHOT  = INTERNAL / "lava-integration"     / "scripts" / "lava_to_snapshot.py"
 GENERATE_REPORT   = INTERNAL / "report-generation"    / "scripts" / "generate_report.py"
 
 PRESETS_FILE = SKILLS / "memory-analysis" / "usecases" / "presets.json"
@@ -315,6 +321,11 @@ def mode_snapshot(args, output_dir: Path) -> Path:
         print(f"{TAG} ERROR: snapshot.json not found at {snapshot_path}")
         sys.exit(1)
 
+    return snapshot_report(snapshot_path, reports_dir)
+
+
+def snapshot_report(snapshot_path: Path, reports_dir: Path) -> Path:
+    """Standalone report for one snapshot (Modes 1 and 5)."""
     # Build report title
     device = read_device_info(snapshot_path)
     model  = device.get("model", "Unknown Device")
@@ -350,6 +361,56 @@ def mode_snapshot(args, output_dir: Path) -> Path:
 
     move_intermediates(reports_dir)
     return dst
+
+
+def mode_lava(args, output_dir: Path) -> Path:
+    """
+    Mode 5: LAVA
+    Rebuild snapshots from a finished LAVA Memory_Snapshot job and report on
+    them: one snapshot -> snapshot report (as Mode 1); baseline + active ->
+    workload impact report (as Mode 2C compare).
+    """
+    src_dir = Path(args.lava_results)
+    results = src_dir / "results.json"
+    if not results.is_file():
+        print(f"{TAG} ERROR: LAVA results not found: {results}")
+        print(f"  Save get_job_results (and get_job, get_job_logs) there, or run")
+        print(f"  scripts/lava_job.py fetch --job-id <id> --output-dir {src_dir}")
+        sys.exit(1)
+
+    print(f"{TAG} Mode: LAVA")
+    print(f"{TAG} Input:  {src_dir}")
+    print(f"{TAG} Output: {output_dir}")
+
+    snaps_dir = output_dir / "lava_snapshots"
+    cmd = [sys.executable, str(LAVA_TO_SNAPSHOT),
+           "--results",    str(results),
+           "--output-dir", str(snaps_dir)]
+    for flag, name in (("--job", "job.json"), ("--logs", "logs.yaml")):
+        if (src_dir / name).is_file():
+            cmd += [flag, str(src_dir / name)]
+    run(cmd, "Rebuilding snapshots from LAVA results")
+
+    with open(snaps_dir / "index.json") as f:
+        index = json.load(f)
+
+    if len(index) == 1:
+        reports_dir = output_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        return snapshot_report(Path(index[0]["path"]), reports_dir)
+
+    # First run is the reference, last the current -- the order lava_job.py
+    # schedules them in (baseline, workload start, active, workload stop).
+    if len(index) > 2:
+        print(f"{TAG} {len(index)} Memory_Snapshot runs; comparing the first and the last")
+    first, last = Path(index[0]["path"]), Path(index[-1]["path"])
+    args.compare_snapshots = [str(first.parent), str(last.parent)]
+    if not args.title:
+        with open(last) as f:
+            job_id = json.load(f).get("lava", {}).get("job_id", "")
+        args.title = (f"{index[-1]['label']} vs {index[0]['label']} -- "
+                      f"LAVA job {job_id} Workload Memory Impact")
+    return mode_user_launched_compare(args, output_dir)
 
 
 def mode_workload(args, output_dir: Path) -> Path:
@@ -886,6 +947,7 @@ def main() -> int:
             "  Workload   : --workload <preset> or --command <cmd>\n"
             "  Regression : --reference <path> with a connected device\n"
             "  Comparison : --current <path> --reference <path>\n"
+            "  LAVA       : --lava-results <dir>\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -1005,13 +1067,27 @@ def main() -> int:
         )
     )
 
+    # --- LAVA parameters (Mode 5) ---
+    parser.add_argument(
+        "--lava-results", metavar="DIR", default=None,
+        help=(
+            "Mode 5: Directory holding a finished LAVA Memory_Snapshot job's "
+            "results.json (get_job_results) and optionally job.json (get_job) "
+            "and logs.yaml (get_job_logs). See scripts/lava_job.py."
+        )
+    )
+
     args = parser.parse_args()
 
     # -----------------------------------------------------------------------
     # Mode detection
     # -----------------------------------------------------------------------
 
-    if args.current and args.reference:
+    if args.lava_results:
+        # Mode 5: Report on a finished LAVA job
+        mode = "lava"
+        default_prefix = "lava"
+    elif args.current and args.reference:
         # Mode 4: Compare two pre-collected snapshots (offline)
         mode = "comparison"
         default_prefix = "comparison"
@@ -1056,7 +1132,9 @@ def main() -> int:
     # Execute selected mode
     # -----------------------------------------------------------------------
 
-    if mode == "snapshot":
+    if mode == "lava":
+        report_path = mode_lava(args, output_dir)
+    elif mode == "snapshot":
         report_path = mode_snapshot(args, output_dir)
     elif mode == "workload":
         report_path = mode_workload(args, output_dir)

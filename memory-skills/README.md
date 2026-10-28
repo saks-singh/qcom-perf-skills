@@ -80,7 +80,7 @@ and are not independently accessible.
 
 **Skill:** `skills/memory-analysis/SKILL.md`
 
-One unified skill with four modes — auto-detected from the parameters you provide.
+One unified skill with five modes — auto-detected from the parameters you provide.
 
 ### Mode 1: Snapshot
 Single memory snapshot from a connected device. No baseline required.
@@ -158,6 +158,23 @@ Snapshot A + Snapshot B → Compare → comparison_report.html
 "Compare results/build_v2/ against results/build_v1/"
 "Offline comparison: current=results/camera_active/ reference=results/baseline/"
 "Compare two snapshots: A=data/device_A/ B=data/device_B/"
+```
+
+---
+
+### Mode 5: LAVA (lava MCP server)
+Schedule the qcom-linux-testkit Memory_Snapshot suite on a LAVA lab board. The
+agent waits for the job, fetches its results, and generates the same report.
+
+```
+lava_job.py render → submit (lava MCP) → fetch results → snapshot_report.html / workload_impact_report.html
+```
+
+**Example prompts:**
+```
+"Give me a memory report for a lemans-evk in LAVA"
+"Measure memory impact of camera_h264_encoding on a LAVA lemans-evk"
+"Make the memory report for LAVA job 516300"
 ```
 
 ---
